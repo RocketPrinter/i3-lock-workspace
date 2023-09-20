@@ -1,0 +1,20 @@
+[package]
+name = "i3-lock-workspace"
+version = "0.1.0"
+edition = "2021"
+description = "CLI utility that locks i3 to a single or multiple workspaces for a set period of time to force yourself to focus on work"
+repository = "https://github.com/RocketPrinter/i3-lock-workspace"
+license = "TODO"
+kewords = ["cli", "utility", "linux"]
+categories = ["command-line-utilities"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.75"
+clap = { version = "4.4.4", features = ["derive"] }
+humantime = "2.1.0"
+notify-rust = "4.9.0"
+tokio-i3ipc = { version = "0.16.0" }
+tokio = { version = "1.32.0", features = ["full"] }
+futures-util = "0.3.28"
