@@ -18,6 +18,9 @@ struct Cli {
     duration: humantime::Duration,
     /// Workspace or workspaces to lock on, uses the curent one if not set
     workspaces: Vec<String>,
+    /// Start after a delay.
+    #[arg(short,long)]
+    delay: Option<humantime::Duration>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -28,13 +31,25 @@ async fn main() -> Result<()> {
 
     // if no workspaces were detect the currently focused one
     if cli.workspaces.is_empty() {
-        let name = i3.get_workspaces().await?.into_iter()
-            .find_map(|ws|ws.focused.then_some(ws.name))
-            .expect("No workspace is focused!");
+        let name = get_focused_workspace(&mut i3).await?.expect("No workspace is focused!");
 
         println!("Locking on workspace {name}");
         cli.workspaces.push(name);
     }
+
+    // delay
+    if let Some(delay) = cli.delay {
+        println!("Starting after {delay}");
+        sleep(delay.into()).await;
+    }
+
+    // we check if the current workspace is allowed
+    {
+        let current_ws = get_focused_workspace(&mut i3).await?;
+        change_workspace_if_disallowed(current_ws.as_deref(), &mut i3, cli.workspaces.as_slice()).await?;
+    }
+
+    println!("Started!");
 
     let mut sleep = spawn(sleep(cli.duration.into()));
 
@@ -43,6 +58,7 @@ async fn main() -> Result<()> {
     listener.subscribe([Subscribe::Workspace]).await?;
     let mut listener = listener.listen();
 
+    // we listen for workspace changes
     loop {
         select! {
             _ = &mut sleep => {break;},
@@ -50,15 +66,7 @@ async fn main() -> Result<()> {
             event = listener.next() => {
                 let Event::Workspace(event) = event.expect("i3-ipc connection was closed!")? else {continue};
                 let name = event.current.and_then(|node|node.name);
-                if name.is_none() || !cli.workspaces.contains(&name.unwrap()) {
-                    i3.send_msg_body(Msg::RunCommand, format!("workspace {}", cli.workspaces[0]) ).await?;
-                    Notification::new()
-                        .summary("Workspace locked!")
-                        .auto_icon()
-                        .timeout(2000)
-                        .urgency(Urgency::Critical)
-                        .show_async().await?;
-                }
+                change_workspace_if_disallowed(name.as_deref(), &mut i3, cli.workspaces.as_slice()).await?;
             }
         }
 
@@ -70,5 +78,25 @@ async fn main() -> Result<()> {
         .timeout(2000)
         .show_async().await?;
 
+    Ok(())
+}
+
+async fn get_focused_workspace(i3: &mut I3) -> Result<Option<String>> {
+    Ok(
+        i3.get_workspaces().await?.into_iter()
+            .find_map(|ws|ws.focused.then_some(ws.name))
+    )
+}
+
+async fn change_workspace_if_disallowed(current_workspace: Option<&str>, i3: &mut I3, allowed_workspaces: &[String]) -> Result<()> {
+    if !allowed_workspaces.iter().any(|allowed| Some(allowed.as_str()) == current_workspace) {
+        i3.send_msg_body(Msg::RunCommand, format!("workspace {}", allowed_workspaces[0]) ).await?;
+        Notification::new()
+            .summary("Workspace locked!")
+            .auto_icon()
+            .timeout(2000)
+            .urgency(Urgency::Critical)
+            .show_async().await?;
+    }
     Ok(())
 }
