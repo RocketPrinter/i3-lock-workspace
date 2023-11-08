@@ -4,11 +4,11 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::stream::StreamExt;
 use notify_rust::{Notification, Urgency};
-use std::ops::Deref;
+use std::ops::{Deref, Not};
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio::{select, spawn};
-use tokio_i3ipc::event::{Event, Subscribe};
+use tokio_i3ipc::event::{Event, Subscribe, WorkspaceChange, WorkspaceData};
 use tokio_i3ipc::msg::Msg;
 use tokio_i3ipc::reply::Workspace;
 use tokio_i3ipc::I3;
@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
 
     let mut i3 = I3::connect().await?;
 
-    // if no workspaces were detect the currently focused one
+    // if workspaces is empty we detect the currently focused one
     if cli.workspaces.is_empty() {
         let ws = get_focused_workspace(&mut i3)
             .await?
@@ -47,6 +47,9 @@ async fn main() -> Result<()> {
         println!("Locking on workspace {}", ws.name);
         cli.workspaces.push(ws.name);
     }
+
+    // if invert is true then we can't easily find an allowed workspace
+    let mut last_allowed_workspace = cli.invert.not().then(|| cli.workspaces[0].clone());
 
     // delay
     if let Some(delay) = cli.delay {
@@ -70,19 +73,18 @@ async fn main() -> Result<()> {
 
     // we check if the current workspace is allowed
     {
-        let current_ws = if cli.use_numbers {
-            get_focused_workspace(&mut i3)
-                .await?
-                .map(|ws| ws.num.to_string())
-        } else {
-            get_focused_workspace(&mut i3).await?.map(|ws| ws.name)
-        };
+        let current_ws = get_focused_workspace(&mut i3).await?.map(|ws| {
+            if cli.use_numbers {
+                ws.num.to_string()
+            } else {
+                ws.name
+            }
+        });
         change_workspace_if_disallowed(
             current_ws.as_deref(),
+            &mut last_allowed_workspace,
             &mut i3,
-            cli.workspaces.as_slice(),
-            cli.invert,
-            cli.use_numbers,
+            &cli,
         )
         .await?;
     }
@@ -103,12 +105,14 @@ async fn main() -> Result<()> {
 
             event = listener.next() => {
                 let Event::Workspace(event) = event.expect("i3-ipc connection was closed!")? else {continue};
+                // we make sure it's a Focus change otherwise we might get inconsistent behaviour
+                let WorkspaceData { current, change: WorkspaceChange::Focus , old:_ } = *event else {continue};
                 let identifier = if cli.use_numbers {
-                    event.current.and_then(|node|node.num.map(|n|n.to_string()))
+                    current.and_then(|node|node.num.map(|n|n.to_string()))
                 } else {
-                    event.current.and_then(|node|node.name)
+                    current.and_then(|node|node.name)
                 };
-                change_workspace_if_disallowed(identifier.as_deref(), &mut i3, cli.workspaces.as_slice(), cli.invert, cli.use_numbers).await?;
+                change_workspace_if_disallowed(identifier.as_deref(), &mut last_allowed_workspace , &mut i3, &cli).await?;
             }
         }
     }
@@ -127,29 +131,34 @@ async fn get_focused_workspace(i3: &mut I3) -> Result<Option<Workspace>> {
     Ok(i3.get_workspaces().await?.into_iter().find(|ws| ws.focused))
 }
 
+fn is_workspace_dissalowed(workspace: &str, cli: &Cli) -> bool {
+    cli.invert ^ !cli.workspaces.iter().any(|allowed| allowed == workspace)
+}
+
 async fn change_workspace_if_disallowed(
     current_workspace: Option<&str>,
+    last_allowed_workspace: &mut Option<String>,
     i3: &mut I3,
-    allowed_workspaces: &[String],
-    invert: bool,
-    numbers: bool,
+    cli: &Cli,
 ) -> Result<()> {
-    if invert
-        ^ !allowed_workspaces
-            .iter()
-            .any(|allowed| Some(allowed.as_str()) == current_workspace)
-    {
-        println!("yes");
-        let command_prefix = if numbers {
-            "workspace number"
+    if current_workspace.is_none() || is_workspace_dissalowed(current_workspace.unwrap(), cli) {
+        if let Some(next_workspace) = last_allowed_workspace {
+            // we switch to the last allowed workspace
+            let command_prefix = if cli.use_numbers {
+                "workspace number"
+            } else {
+                "workspace"
+            };
+            i3.send_msg_body(
+                Msg::RunCommand,
+                format!("{} {}", command_prefix, next_workspace),
+            )
+            .await?;
         } else {
-            "workspace"
-        };
-        i3.send_msg_body(
-            Msg::RunCommand,
-            format!("{} {}", command_prefix, allowed_workspaces[0]),
-        )
-        .await?;
+            // we don't have an allowed workspace to switch to so the simplest solution is to open a temporary one
+            i3.send_msg_body(Msg::RunCommand, format!("{} {}", "workspace", "temp"))
+                .await?;
+        }
         Notification::new()
             .summary("Workspace locked!")
             .auto_icon()
@@ -157,6 +166,9 @@ async fn change_workspace_if_disallowed(
             .urgency(Urgency::Critical)
             .show_async()
             .await?;
+    } else {
+        // this workspace is allowed
+        *last_allowed_workspace = Some(current_workspace.unwrap().to_string());
     }
     Ok(())
 }

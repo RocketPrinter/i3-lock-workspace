@@ -1,6 +1,6 @@
 [package]
 name = "i3-lock-workspace"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "CLI utility that locks i3 to a single or multiple workspaces for a set period of time to force yourself to focus on work"
 repository = "https://github.com/RocketPrinter/i3-lock-workspace"
